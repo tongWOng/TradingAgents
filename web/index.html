@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Live multi-agent market intelligence and trade research.">
+  <title>TradingAgents — Agentic Market Intelligence</title>
+  <link rel="stylesheet" href="/assets/styles.css">
+</head>
+<body>
+  <div class="noise"></div>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="TradingAgents home">
+      <span class="brand-mark">TA</span>
+      <span>TradingAgents</span>
+    </a>
+    <div class="system-state"><span class="live-dot"></span> System online</div>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div class="eyebrow">MULTI-AGENT MARKET INTELLIGENCE</div>
+      <h1>One market question.<br><span>An entire research desk.</span></h1>
+      <p>Watch specialized AI agents collect evidence, debate the thesis, test risk and converge on one actionable decision.</p>
+    </section>
+
+    <section class="workspace">
+      <aside class="control-panel panel">
+        <div class="panel-heading">
+          <div><span class="section-index">01</span><h2>Analysis brief</h2></div>
+          <span class="secure-badge">Private run</span>
+        </div>
+        <form id="analysis-form">
+          <label for="ticker">Ticker</label>
+          <div class="ticker-input"><span>$</span><input id="ticker" name="ticker" value="NVDA" maxlength="32" autocomplete="off" required></div>
+
+          <label for="trade-date">Analysis date</label>
+          <input id="trade-date" name="trade-date" type="date" required>
+
+          <div class="field-title"><span>Deploy analysts</span><small>Select at least one</small></div>
+          <div class="analyst-picker">
+            <label><input type="checkbox" name="analysts" value="market" checked><span><b>MK</b>Market</span></label>
+            <label><input type="checkbox" name="analysts" value="social"><span><b>SO</b>Social</span></label>
+            <label><input type="checkbox" name="analysts" value="news"><span><b>NW</b>News</span></label>
+            <label><input type="checkbox" name="analysts" value="fundamentals"><span><b>FN</b>Fundamentals</span></label>
+          </div>
+
+          <button id="run-button" class="run-button" type="submit"><span>Run analysis</span><i>→</i></button>
+          <div id="form-error" class="form-error" role="alert"></div>
+        </form>
+      </aside>
+
+      <section class="mission-panel panel">
+        <div class="panel-heading">
+          <div><span class="section-index">02</span><h2>Agent mission control</h2></div>
+          <div id="elapsed" class="elapsed">00:00</div>
+        </div>
+        <div id="status-banner" class="status-banner idle" role="status" aria-live="polite">
+          <div><span class="status-orb"></span><strong>Ready for deployment</strong></div>
+          <p>Configure a brief to activate the research team.</p>
+        </div>
+        <div class="progress-track"><div id="progress-bar"></div></div>
+        <div class="progress-meta"><span id="stage-label">Standby</span><span id="progress-label">0%</span></div>
+        <div id="agent-grid" class="agent-grid empty-state">
+          <div class="empty-visual"><span></span><span></span><span></span></div>
+          <p>Agent activity will appear here in real time.</p>
+        </div>
+      </section>
+    </section>
+
+    <section id="results" class="results hidden">
+      <div class="result-header">
+        <div><span class="section-index">03</span><h2>Investment committee output</h2></div>
+        <span id="rating" class="rating">—</span>
+      </div>
+      <div class="result-tabs" role="tablist">
+        <button class="active" data-tab="decision" role="tab">Final decision</button>
+        <button data-tab="reports" role="tab">Research reports <span id="report-count">0</span></button>
+      </div>
+      <article id="decision-panel" class="result-panel"></article>
+      <div id="reports-panel" class="result-panel hidden"></div>
+    </section>
+  </main>
+
+  <footer><span id="version">TradingAgents</span><span>Research, debate, risk, decide.</span></footer>
+  <script src="/assets/app.js" defer></script>
+</body>
+</html>

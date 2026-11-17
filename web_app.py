@@ -1,27 +1,37 @@
-"""Minimal non-interactive Gradio UI for TradingAgents."""
+"""HTTP API and static web host for the TradingAgents dashboard."""
 
 from __future__ import annotations
 
+import json
 import os
+import queue
 import re
-from collections.abc import Iterator
+import threading
+import uuid
 from datetime import date
-from html import escape
+from pathlib import Path
+from typing import Any
 
-import gradio as gr
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 
 import tradingagents
+from tradingagents.agents.rating import run_rating
+from tradingagents.dataflows.config import run_config
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 
 
-WEB_UI_VERSION = "2026.11.17.1"
+WEB_UI_VERSION = "2026.11.18.1"
+WEB_DIR = Path(__file__).with_name("web")
 
 ANALYST_LABELS = {
-    "Market": "market",
-    "Social": "social",
-    "News": "news",
-    "Fundamentals": "fundamentals",
+    "market": "Market Analyst",
+    "social": "Social Analyst",
+    "news": "News Analyst",
+    "fundamentals": "Fundamentals Analyst",
 }
 
 REPORTS = (
@@ -33,84 +43,42 @@ REPORTS = (
     ("Trader plan", "trader_investment_plan"),
 )
 
-_APP_CSS = """
-.gradio-container { max-width: 1180px !important; margin: 0 auto !important; }
-.hero { padding: 1.4rem 1.6rem; border: 1px solid var(--border-color-primary);
-        border-radius: 18px; background: linear-gradient(135deg, #0f172a, #172554); color: white; }
-.hero h1 { margin: 0 0 .35rem; font-size: 2rem; }
-.hero p { margin: 0; color: #cbd5e1; }
-.control-card { border: 1px solid var(--border-color-primary); border-radius: 16px; padding: 1rem; }
-.run-button { min-height: 48px; font-weight: 700; }
-.status-card { border-radius: 12px; padding: .8rem 1rem; margin-top: .35rem; font-weight: 600; }
-.status-idle { background: #f1f5f9; color: #475569; }
-.status-running { background: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe; }
-.status-success { background: #ecfdf5; color: #047857; border: 1px solid #a7f3d0; }
-.status-error { background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; }
-.app-footer { margin-top: 1.25rem; padding: .8rem; text-align: center; color: #64748b;
-              font-size: .82rem; border-top: 1px solid var(--border-color-primary); }
-"""
+REPORT_AGENT = {
+    "market_report": "market",
+    "sentiment_report": "social",
+    "news_report": "news",
+    "fundamentals_report": "fundamentals",
+    "investment_plan": "research",
+    "trader_investment_plan": "trader",
+    "risk_debate_state": "risk",
+    "final_trade_decision": "portfolio",
+}
+
+PIPELINE_AGENTS = {
+    "research": "Research Team",
+    "trader": "Trader Agent",
+    "risk": "Risk Team",
+    "portfolio": "Portfolio Manager",
+}
 
 
-def _status(kind: str, title: str, detail: str = "") -> str:
-    """Render a compact, escaped status banner."""
-    icons = {"idle": "○", "running": "◌", "success": "✓", "error": "!"}
-    suffix = (
-        f"<div style='font-weight:400;margin-top:.2rem'>{escape(detail)}</div>"
-        if detail
-        else ""
-    )
-    return (
-        f"<div class='status-card status-{kind}' role='status' aria-live='polite'>"
-        f"{icons[kind]} {escape(title)}{suffix}</div>"
-    )
+class AnalysisRequest(BaseModel):
+    ticker: str = Field(min_length=1, max_length=32)
+    trade_date: str
+    analysts: list[str] = Field(min_length=1, max_length=4)
 
 
-def _friendly_error(exc: Exception) -> tuple[str, str]:
-    """Turn provider failures into actionable UI copy without exposing secrets."""
-    raw = str(exc).strip()
-    lowered = raw.lower()
-    if any(word in lowered for word in ("api key", "authentication", "unauthorized", "401", "403")):
-        title = "AI service authentication failed"
-        guidance = "Check the configured provider and API key, then try again."
-    elif any(word in lowered for word in ("rate limit", "too many requests", "429", "quota")):
-        title = "AI service is rate limited"
-        guidance = "Wait a moment, check your quota, or choose a provider with available capacity."
-    elif any(word in lowered for word in ("timeout", "timed out", "connection", "network", "dns")):
-        title = "The AI or data service is unreachable"
-        guidance = "Check the network and service endpoint, then retry."
-    elif any(word in lowered for word in ("model", "llm", "provider")):
-        title = "AI model request failed"
-        guidance = "Check the selected provider and model configuration, then retry."
-    else:
-        title = "Analysis could not be completed"
-        guidance = "Review the server logs for details, then retry."
+class AnalysisJob:
+    def __init__(self) -> None:
+        self.events: queue.Queue[dict[str, Any]] = queue.Queue()
+        self.done = False
 
-    # Common key/token formats are redacted before a short diagnostic is shown.
-    safe = re.sub(
-        r"(?i)(api[_ -]?key|token|authorization)(\s*[:=]\s*)(\S+)",
-        r"\1\2[redacted]",
-        raw,
-    )
-    safe = re.sub(r"\b(?:sk|key)-[A-Za-z0-9_-]{8,}\b", "[redacted]", safe)
-    if safe:
-        guidance += f" Technical detail: {safe[:240]}"
-    return title, guidance
+    def emit(self, event: str, **payload: Any) -> None:
+        self.events.put({"event": event, **payload})
 
 
-def _version_footer() -> str:
-    """Identify both the UI revision and the Railway deployment commit."""
-    commit = (
-        os.getenv("RAILWAY_GIT_COMMIT_SHA")
-        or os.getenv("SOURCE_VERSION")
-        or os.getenv("GIT_COMMIT_SHA")
-    )
-    build = escape(commit[:7]) if commit else "local"
-    return (
-        "<footer class='app-footer'>"
-        f"TradingAgents {escape(tradingagents.__version__)} · "
-        f"UI {WEB_UI_VERSION} · Build {build}"
-        "</footer>"
-    )
+_jobs: dict[str, AnalysisJob] = {}
+_jobs_lock = threading.Lock()
 
 
 def _web_config() -> dict:
@@ -124,11 +92,11 @@ def _web_config() -> dict:
     return config
 
 
-def _format_reports(state: dict) -> str:
+def _format_reports(state: dict) -> list[dict[str, str]]:
     sections = []
     for title, key in REPORTS:
         if text := state.get(key):
-            sections.append(f"## {title}\n\n{text}")
+            sections.append({"title": title, "content": str(text)})
 
     risk = state.get("risk_debate_state") or {}
     for title, key in (
@@ -137,135 +105,223 @@ def _format_reports(state: dict) -> str:
         ("Neutral risk view", "neutral_history"),
     ):
         if text := risk.get(key):
-            sections.append(f"## {title}\n\n{text}")
-    return "\n\n---\n\n".join(sections) or "No reports were returned."
+            sections.append({"title": title, "content": str(text)})
+    return sections
 
 
-def analyze(
-    ticker: str,
-    trade_date: str,
-    analysts: list[str],
-    progress=gr.Progress(track_tqdm=False),
-) -> Iterator[tuple[str, str, str, object]]:
-    """Run an analysis while streaming visible lifecycle and failure states."""
-    ticker = (ticker or "").strip().upper()
-    if not ticker:
-        yield (
-            "",
-            "",
-            _status("error", "Ticker is required", "Enter a symbol such as AAPL."),
-            gr.Button(interactive=True),
-        )
-        return
-    if not analysts:
-        yield (
-            "",
-            "",
-            _status("error", "No analyst selected", "Select at least one analyst."),
-            gr.Button(interactive=True),
-        )
-        return
+def _friendly_error(exc: Exception) -> tuple[str, str]:
+    """Turn provider failures into actionable UI copy without exposing secrets."""
+    raw = str(exc).strip()
+    lowered = raw.lower()
+    if any(word in lowered for word in ("api key", "authentication", "unauthorized", "401", "403")):
+        title = "AI service authentication failed"
+        guidance = "Check the configured provider and API key, then try again."
+    elif any(word in lowered for word in ("rate limit", "too many requests", "429", "quota")):
+        title = "AI service is rate limited"
+        guidance = "Wait a moment, check your quota, or use a provider with available capacity."
+    elif any(word in lowered for word in ("timeout", "timed out", "connection", "network", "dns")):
+        title = "The AI or data service is unreachable"
+        guidance = "Check the network and service endpoint, then retry."
+    elif any(word in lowered for word in ("model", "llm", "provider")):
+        title = "AI model request failed"
+        guidance = "Check the selected provider and model configuration, then retry."
+    else:
+        title = "Analysis could not be completed"
+        guidance = "Review the Railway deploy logs for details, then retry."
 
+    safe = re.sub(
+        r"(?i)(api[_ -]?key|token|authorization)(\s*[:=]\s*)(\S+)",
+        r"\1\2[redacted]",
+        raw,
+    )
+    safe = re.sub(r"\b(?:sk|key)-[A-Za-z0-9_-]{8,}\b", "[redacted]", safe)
+    if safe:
+        guidance += f" Technical detail: {safe[:240]}"
+    return title, guidance
+
+
+def _validate_request(request: AnalysisRequest) -> tuple[str, str, list[str]]:
+    ticker = request.ticker.strip().upper()
+    if not re.fullmatch(r"[A-Z0-9.^=/_-]+", ticker):
+        raise HTTPException(status_code=422, detail="Ticker contains unsupported characters.")
     try:
-        parsed_date = date.fromisoformat((trade_date or "").strip())
-        if parsed_date > date.today():
-            raise ValueError
-    except ValueError:
-        yield (
-            "",
-            "",
-            _status(
-                "error",
-                "Invalid analysis date",
-                "Use YYYY-MM-DD and do not select a future date.",
-            ),
-            gr.Button(interactive=True),
-        )
-        return
+        parsed = date.fromisoformat(request.trade_date.strip())
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="Use a valid date in YYYY-MM-DD format.") from exc
+    if parsed > date.today():
+        raise HTTPException(status_code=422, detail="Analysis date cannot be in the future.")
+    analysts = list(dict.fromkeys(request.analysts))
+    unknown = set(analysts) - set(ANALYST_LABELS)
+    if unknown:
+        raise HTTPException(status_code=422, detail=f"Unknown analysts: {', '.join(sorted(unknown))}")
+    return ticker, parsed.isoformat(), analysts
 
-    canonical_date = parsed_date.isoformat()
-    selected = [ANALYST_LABELS[label] for label in analysts]
+
+def _progress(completed: set[str], total: int) -> int:
+    return min(96, 8 + round((len(completed) / max(total, 1)) * 86))
+
+
+def _has_agent_output(state: dict[str, Any], state_key: str) -> bool:
+    value = state.get(state_key)
+    if state_key != "risk_debate_state":
+        return bool(value)
+    risk = value or {}
+    return any(
+        risk.get(key)
+        for key in ("aggressive_history", "conservative_history", "neutral_history")
+    )
+
+
+def _run_analysis(job: AnalysisJob, ticker: str, trade_date: str, analysts: list[str]) -> None:
+    selected_names = {key: ANALYST_LABELS[key] for key in analysts}
+    agent_names = {**selected_names, **PIPELINE_AGENTS}
+    completed: set[str] = set()
+    total = len(agent_names)
+    graph: TradingAgentsGraph | None = None
+    checkpoint_id: str | None = None
+
+    job.emit("status", stage="preparing", message="Preparing the analyst workspace", progress=3)
+    job.emit("agents", agents=[{"id": key, "name": name} for key, name in agent_names.items()])
     try:
-        progress(0.08, desc="Validating settings")
-        yield (
-            "",
-            "",
-            _status(
-                "running",
-                "Preparing the analyst team",
-                f"{ticker} · {canonical_date} · {len(selected)} analyst(s)",
-            ),
-            gr.Button(interactive=False),
-        )
         graph = TradingAgentsGraph(
-            selected_analysts=selected,
+            selected_analysts=analysts,
             debug=False,
             config=_web_config(),
         )
-        progress(0.22, desc="Starting AI agents")
-        yield (
-            "",
-            "",
-            _status(
-                "running",
-                "AI agents are working",
-                "Collecting market data and generating the analysis. This may take several minutes.",
-            ),
-            gr.Button(interactive=False),
+        for key in analysts:
+            job.emit("agent", id=key, status="running", message="Collecting evidence")
+        job.emit("status", stage="analysis", message="Analyst agents are gathering evidence", progress=8)
+
+        with run_config(graph.config):
+            checkpoint_id = graph.begin_checkpoint(ticker, trade_date)
+            initial_state = graph.create_run_state(ticker, trade_date)
+            args = graph.propagator.get_graph_args()
+            if checkpoint_id is not None:
+                args.setdefault("config", {}).setdefault("configurable", {})["thread_id"] = checkpoint_id
+            graph_input = graph.checkpoint_input(initial_state)
+            final_state: dict[str, Any] = {}
+
+            for _messages, state in graph.stream_run(graph_input, **args):
+                if not state:
+                    continue
+                final_state.update(state)
+                for state_key, agent_id in REPORT_AGENT.items():
+                    if agent_id in completed or not _has_agent_output(state, state_key):
+                        continue
+                    completed.add(agent_id)
+                    job.emit("agent", id=agent_id, status="complete", message="Report ready")
+                    if agent_id in analysts:
+                        remaining = [key for key in analysts if key not in completed]
+                        if not remaining:
+                            job.emit("agent", id="research", status="running", message="Debating the thesis")
+                    elif agent_id == "research":
+                        job.emit("agent", id="trader", status="running", message="Building the trade plan")
+                    elif agent_id == "trader":
+                        job.emit("agent", id="risk", status="running", message="Stress-testing the plan")
+                    elif agent_id == "risk":
+                        job.emit("agent", id="portfolio", status="running", message="Forming the final decision")
+                    job.emit(
+                        "status",
+                        stage=agent_id,
+                        message=f"{agent_names[agent_id]} completed",
+                        progress=_progress(completed, total),
+                    )
+
+            graph.record_decision(ticker, trade_date, final_state)
+            graph.clear_checkpoint_on_success(ticker, trade_date)
+            rating = run_rating(final_state)
+
+        for agent_id in agent_names:
+            if agent_id not in completed:
+                completed.add(agent_id)
+                job.emit("agent", id=agent_id, status="complete", message="Complete")
+        job.emit(
+            "result",
+            rating=rating,
+            decision=final_state.get("final_trade_decision") or "No final decision was returned.",
+            reports=_format_reports(final_state),
+            progress=100,
         )
-        final_state, rating = graph.propagate(ticker, canonical_date)
     except Exception as exc:
         title, detail = _friendly_error(exc)
-        yield "", "", _status("error", title, detail), gr.Button(interactive=True)
-        return
+        for agent_id in agent_names:
+            if agent_id not in completed:
+                job.emit("agent", id=agent_id, status="error", message="Stopped")
+        job.emit("failure", title=title, message=detail)
+    finally:
+        if graph is not None:
+            graph.end_checkpoint()
+        job.done = True
+        job.emit("done")
 
-    progress(1.0, desc="Complete")
-    decision = final_state.get("final_trade_decision") or "No final decision was returned."
-    yield (
-        f"# {rating}\n\n{decision}",
-        _format_reports(final_state),
-        _status("success", "Analysis complete", f"The {ticker} decision and reports are ready."),
-        gr.Button(interactive=True),
+
+app = FastAPI(title="TradingAgents Web API", version=WEB_UI_VERSION)
+app.mount("/assets", StaticFiles(directory=WEB_DIR), name="assets")
+
+
+@app.get("/", include_in_schema=False)
+def index() -> FileResponse:
+    return FileResponse(WEB_DIR / "index.html")
+
+
+@app.get("/api/meta")
+def meta() -> dict[str, Any]:
+    commit = os.getenv("RAILWAY_GIT_COMMIT_SHA") or os.getenv("SOURCE_VERSION")
+    return {
+        "app_version": tradingagents.__version__,
+        "ui_version": WEB_UI_VERSION,
+        "build": commit[:7] if commit else "local",
+        "today": date.today().isoformat(),
+    }
+
+
+@app.post("/api/analyses", status_code=202)
+def create_analysis(request: AnalysisRequest) -> dict[str, str]:
+    ticker, trade_date, analysts = _validate_request(request)
+    job_id = uuid.uuid4().hex
+    job = AnalysisJob()
+    with _jobs_lock:
+        if len(_jobs) >= 100:
+            finished = [key for key, value in _jobs.items() if value.done]
+            for key in finished[:50]:
+                _jobs.pop(key, None)
+        _jobs[job_id] = job
+    threading.Thread(
+        target=_run_analysis,
+        args=(job, ticker, trade_date, analysts),
+        daemon=True,
+        name=f"analysis-{job_id[:8]}",
+    ).start()
+    return {"job_id": job_id}
+
+
+@app.get("/api/analyses/{job_id}/events")
+def analysis_events(job_id: str) -> StreamingResponse:
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Analysis job was not found.")
+
+    def stream():
+        while True:
+            try:
+                payload = job.events.get(timeout=15)
+            except queue.Empty:
+                yield ": keep-alive\n\n"
+                continue
+            event = payload.pop("event")
+            yield f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+            if event == "done":
+                break
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
-
-
-def build_app() -> gr.Blocks:
-    with gr.Blocks(title="TradingAgents", css=_APP_CSS) as app:
-        gr.HTML(
-            "<div class='hero'><h1>TradingAgents</h1>"
-            "<p>Multi-agent market research, distilled into one decision.</p></div>"
-        )
-        with gr.Group(elem_classes="control-card"):
-            with gr.Row():
-                ticker = gr.Textbox(label="Ticker", value="NVDA", placeholder="e.g. AAPL")
-                trade_date = gr.Textbox(
-                    label="Analysis date",
-                    value=date.today().isoformat(),
-                    placeholder="YYYY-MM-DD",
-                )
-            analysts = gr.CheckboxGroup(
-                choices=list(ANALYST_LABELS),
-                value=["Market"],
-                label="Analyst team",
-                info="Fewer analysts finish faster and use fewer tokens.",
-            )
-            run = gr.Button("Run analysis", variant="primary", elem_classes="run-button")
-            status = gr.HTML(_status("idle", "Ready", "Choose your inputs and run the analysis."))
-        with gr.Tab("Decision"):
-            decision = gr.Markdown("_The final recommendation will appear here._")
-        with gr.Tab("Reports"):
-            reports = gr.Markdown("_Detailed analyst reports will appear here._")
-        run.click(analyze, [ticker, trade_date, analysts], [decision, reports, status, run])
-        gr.HTML(_version_footer())
-    return app
-
-
-app = build_app()
 
 
 if __name__ == "__main__":
-    app.queue(default_concurrency_limit=1).launch(
-        server_name="0.0.0.0",
-        server_port=int(os.getenv("PORT", "7860")),
-        show_error=True,
-    )
+    import uvicorn
+
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "7860")))
