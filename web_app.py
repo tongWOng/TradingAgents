@@ -10,9 +10,12 @@ from html import escape
 
 import gradio as gr
 
+import tradingagents
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 
+
+WEB_UI_VERSION = "2026.11.17.1"
 
 ANALYST_LABELS = {
     "Market": "market",
@@ -43,6 +46,8 @@ _APP_CSS = """
 .status-running { background: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe; }
 .status-success { background: #ecfdf5; color: #047857; border: 1px solid #a7f3d0; }
 .status-error { background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; }
+.app-footer { margin-top: 1.25rem; padding: .8rem; text-align: center; color: #64748b;
+              font-size: .82rem; border-top: 1px solid var(--border-color-primary); }
 """
 
 
@@ -90,6 +95,22 @@ def _friendly_error(exc: Exception) -> tuple[str, str]:
     if safe:
         guidance += f" Technical detail: {safe[:240]}"
     return title, guidance
+
+
+def _version_footer() -> str:
+    """Identify both the UI revision and the Railway deployment commit."""
+    commit = (
+        os.getenv("RAILWAY_GIT_COMMIT_SHA")
+        or os.getenv("SOURCE_VERSION")
+        or os.getenv("GIT_COMMIT_SHA")
+    )
+    build = escape(commit[:7]) if commit else "local"
+    return (
+        "<footer class='app-footer'>"
+        f"TradingAgents {escape(tradingagents.__version__)} · "
+        f"UI {WEB_UI_VERSION} · Build {build}"
+        "</footer>"
+    )
 
 
 def _web_config() -> dict:
@@ -235,6 +256,7 @@ def build_app() -> gr.Blocks:
         with gr.Tab("Reports"):
             reports = gr.Markdown("_Detailed analyst reports will appear here._")
         run.click(analyze, [ticker, trade_date, analysts], [decision, reports, status, run])
+        gr.HTML(_version_footer())
     return app
 
 

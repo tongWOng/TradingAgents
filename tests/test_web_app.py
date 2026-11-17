@@ -1,4 +1,11 @@
-from web_app import _format_reports, _friendly_error, _status, _web_config
+from web_app import (
+    WEB_UI_VERSION,
+    _format_reports,
+    _friendly_error,
+    _status,
+    _version_footer,
+    _web_config,
+)
 
 
 def test_web_config_uses_low_cost_defaults(monkeypatch):
@@ -33,3 +40,10 @@ def test_friendly_error_classifies_rate_limit():
     title, detail = _friendly_error(RuntimeError("429 rate limit exceeded"))
     assert "rate limited" in title.lower()
     assert "quota" in detail.lower()
+
+
+def test_version_footer_shows_ui_version_and_deploy_commit(monkeypatch):
+    monkeypatch.setenv("RAILWAY_GIT_COMMIT_SHA", "abcdef1234567890")
+    output = _version_footer()
+    assert f"UI {WEB_UI_VERSION}" in output
+    assert "Build abcdef1" in output
