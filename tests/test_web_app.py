@@ -1,4 +1,4 @@
-from web_app import _format_reports, _web_config
+from web_app import _format_reports, _friendly_error, _status, _web_config
 
 
 def test_web_config_uses_low_cost_defaults(monkeypatch):
@@ -13,3 +13,23 @@ def test_format_reports_omits_empty_sections():
     assert "Market report" in output
     assert "Market text" in output
     assert "News report" not in output
+
+
+def test_status_escapes_untrusted_content():
+    output = _status("error", "Failed <script>", "bad & worse")
+    assert "<script>" not in output
+    assert "&lt;script&gt;" in output
+    assert "bad &amp; worse" in output
+
+
+def test_friendly_error_classifies_and_redacts_auth_failure():
+    title, detail = _friendly_error(ValueError("API key: sk-super-secret-value is unauthorized"))
+    assert "authentication" in title.lower()
+    assert "super-secret" not in detail
+    assert "[redacted]" in detail
+
+
+def test_friendly_error_classifies_rate_limit():
+    title, detail = _friendly_error(RuntimeError("429 rate limit exceeded"))
+    assert "rate limited" in title.lower()
+    assert "quota" in detail.lower()
